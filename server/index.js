@@ -10,27 +10,47 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ai_mystery_room';
 
-// CORS Configuration
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:3000',
+// Authoritative CORS Configuration
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://client-tau-sable-95.vercel.app',
   process.env.CLIENT_URL
 ].filter(Boolean);
 
+const DEV_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000'
+];
+
+const EXTRA_ALLOWED = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+export function isOriginAllowed(origin) {
+  // Allow non-browser requests (curl, server-to-server, unit/integration test agents)
+  if (!origin) return true;
+
+  if (DEFAULT_ALLOWED_ORIGINS.includes(origin)) return true;
+  if (EXTRA_ALLOWED.includes(origin)) return true;
+
+  // In development and testing, permit local host addresses
+  if (!isProduction && DEV_ALLOWED_ORIGINS.includes(origin)) {
+    return true;
+  }
+
+  return false;
+}
+
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser requests (curl, server-to-server) or matched origins
-    if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+    if (isOriginAllowed(origin)) {
       callback(null, true);
     } else {
-      // In production log warning, allow in development
-      if (process.env.NODE_ENV === 'production') {
-        callback(null, true); // Permissive to prevent user blockage, documented in audit
-      } else {
-        callback(null, true);
-      }
+      callback(new Error('CORS_ORIGIN_NOT_ALLOWED: Request from unauthorized origin blocked by CORS policy.'));
     }
   },
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -84,12 +104,17 @@ app.use('/api/cases', casesRouter);
 
 // Global Error Handler
 app.use((err, req, res, next) => {
+  if (err.message && err.message.startsWith('CORS_ORIGIN_NOT_ALLOWED')) {
+    return res.status(403).json({
+      error: 'Access denied: origin not allowed by CORS policy',
+      code: 'CORS_FORBIDDEN'
+    });
+  }
+
   console.error('[Server Error]:', err.message);
   res.status(err.status || 500).json({ 
     error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'production' 
-      ? 'An unexpected error occurred while processing your request.' 
-      : err.message
+    code: 'INTERNAL_SERVER_ERROR'
   });
 });
 

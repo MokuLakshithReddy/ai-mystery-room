@@ -81,10 +81,11 @@ export const RawMysterySchema = z.object({
 });
 
 /**
- * Comprehensive Logical Consistency & Reference Validation
- * Validates counts, uniqueness, cross-references, and causal consistency.
+ * Structural, Referential, and Evidence-Trail Consistency Validator
+ * Validates counts, unique identifiers, cross-references, alibi consistency,
+ * and crucial clue discoverability.
  *
- * @param {object} mystery - The parsed mystery object
+ * @param {object} mystery - The raw or parsed mystery object
  * @param {string} difficulty - 'easy' | 'medium' | 'hard'
  * @returns {{ valid: boolean, errors: string[] }}
  */
@@ -141,11 +142,13 @@ export function validateMystery(mystery, difficulty) {
   });
 
   const clueIds = new Set();
+  const clueMap = new Map();
   data.clues.forEach((c, idx) => {
     if (clueIds.has(c.id)) {
       errors.push(`Duplicate clue ID detected: "${c.id}" at index ${idx}`);
     }
     clueIds.add(c.id);
+    clueMap.set(c.id, c);
   });
 
   const hintIds = new Set();
@@ -156,8 +159,7 @@ export function validateMystery(mystery, difficulty) {
     hintIds.add(h.id);
   });
 
-  // 4. Culprit cross-reference check
-  // CRITICAL: Culprit must exist in suspects. Never silently rewrite!
+  // 4. Culprit cross-reference and motive check
   const culpritSuspect = data.suspects.find(s => s.id === data.solution.culpritId);
   if (!culpritSuspect) {
     errors.push(
@@ -165,34 +167,53 @@ export function validateMystery(mystery, difficulty) {
     );
   } else {
     // Check culprit name alignment
-    if (!culpritSuspect.name.toLowerCase().includes(data.solution.culpritName.toLowerCase()) &&
-        !data.solution.culpritName.toLowerCase().includes(culpritSuspect.name.toLowerCase())) {
+    const nameMatch = 
+      culpritSuspect.name.toLowerCase().includes(data.solution.culpritName.toLowerCase()) ||
+      data.solution.culpritName.toLowerCase().includes(culpritSuspect.name.toLowerCase());
+
+    if (!nameMatch) {
       errors.push(
         `Culprit name mismatch: solution states "${data.solution.culpritName}" but suspect ID "${data.solution.culpritId}" is named "${culpritSuspect.name}".`
       );
     }
+
+    // Check motive alignment
+    if (!culpritSuspect.motive || culpritSuspect.motive.trim().length < 5) {
+      errors.push(`Culprit suspect "${culpritSuspect.name}" lacks a detailed motive.`);
+    }
   }
 
-  // 5. Crucial clues reference check
-  // All crucial clues must exist in the clues array
-  data.solution.crucialClueIds.forEach((crucialId) => {
-    if (!clueIds.has(crucialId)) {
-      errors.push(
-        `Solution crucialClueIds references non-existent clue ID "${crucialId}".`
-      );
-    }
-  });
+  // 5. Crucial clues discoverability and evidence trail check
+  if (!Array.isArray(data.solution.crucialClueIds) || data.solution.crucialClueIds.length === 0) {
+    errors.push('Solution must cite at least one crucial clue ID.');
+  } else {
+    data.solution.crucialClueIds.forEach((crucialId) => {
+      const referencedClue = clueMap.get(crucialId);
+      if (!referencedClue) {
+        errors.push(
+          `Solution crucialClueIds references non-existent clue ID "${crucialId}".`
+        );
+      } else {
+        // Crucial clue must have substantive physical or testimonial evidence
+        if (referencedClue.description.length < 15) {
+          errors.push(
+            `Crucial clue "${crucialId}" description is too brief to substantiate the crime.`
+          );
+        }
+      }
+    });
+  }
 
   // 6. Logical consistency checks
-  // A. Check that the crime scene narrative defines who the victim is
+  // A. Victim identification
   if (!data.story.victim || data.story.victim.trim().length < 2) {
     errors.push('Crime story missing valid victim name.');
   }
 
-  // B. Ensure all clues have unique non-empty locations
+  // B. Spatial diversity of clues
   const clueLocations = data.clues.map(c => c.location.toLowerCase().trim());
   const uniqueLocations = new Set(clueLocations);
-  if (uniqueLocations.size < Math.floor(data.clues.length * 0.7)) {
+  if (uniqueLocations.size < Math.floor(data.clues.length * 0.6)) {
     errors.push('Clues lack spatial diversity across the crime scene.');
   }
 

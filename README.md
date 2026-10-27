@@ -47,12 +47,12 @@ Unlike static murder-mystery games, every case is generated dynamically with str
 - **Vitest & React Testing Library**: Component testing suite.
 
 ### Backend (`/server`)
-- **Node.js & Express**: High-performance RESTful API with CORS and JSON parsing.
+- **Node.js & Express**: High-performance RESTful API with strict CORS origin verification and JSON parsing.
 - **MongoDB & Mongoose**: Object document mapping with custom security projection (`select: false` on solutions).
 - **Google Gen AI (`@google/genai`)**: Structured JSON outputs using `gemini-2.5-flash`.
-- **Zod & Custom Validator**: Strict schema and logical consistency validation (`validateMystery`).
-- **Vitest & Supertest**: Full automated unit and integration test suite (39 tests).
-- **Multi-Tier Resilient Persistence**: Seamless durability across MongoDB, Supabase Cloud Store, and local memory cache.
+- **Zod & Custom Validator**: Strict schema, referential integrity, and evidence-trail validation (`validateMystery`).
+- **Vitest & Supertest**: Full automated unit and integration test suite (48 tests).
+- **Durable Persistence & Concurrency Locks**: Enforces durable persistence before returning success; uses `withCaseLock` mutex to prevent race conditions.
 
 ---
 
@@ -61,6 +61,7 @@ Unlike static murder-mystery games, every case is generated dynamically with str
 2. **Clue Concealment**: Unexamined clues only transmit their general location. Detailed descriptions remain hidden on the server until the player inspects the evidence sector.
 3. **Locked Hints**: Hint texts are masked until the player deliberately requests a declassification (-10 pts penalty).
 4. **Permanent Sealing**: Accusations are irreversible once filed. Once submitted, the backend unseals the verdict, solution breakdown, and score breakdown.
+5. **Strict CORS**: Production endpoints verify browser origins and reject unauthorized origins with HTTP 403.
 
 ---
 
@@ -85,22 +86,26 @@ $$\text{Total Score} = \max\left(0, (\text{Correct ? Base Bounty} : 0) + (5 \tim
 
 ## 🧪 Automated Testing
 
-### Running Backend Tests (39 Passing Tests)
+### Running Backend Tests (48 Passing Tests)
 ```bash
 cd server
 npm test
 ```
 Covers:
-- `mysteryValidator.test.js`: Exact suspect/clue/hint counts, ID uniqueness, culprit cross-referencing.
-- `scoring.test.js`: Base bounty calculations, clue bonuses, hint penalties, 0 floor limit.
+- `mysteryValidator.test.js`: Exact suspect/clue/hint counts, ID uniqueness, culprit cross-referencing, evidence trail, spatial diversity.
+- `scoring.test.js`: Direct testing of production `calculateScore` from `CaseStore.js`.
 - `secrecy.test.js`: Active case sanitization, solution masking, clue description concealment.
-- `casesApi.test.js`: Full integration suite testing all endpoints, error codes, and validation.
+- `persistenceFailure.test.js`: Asserts `DURABLE_PERSISTENCE_FAILED` when durable stores are unavailable.
+- `casesApi.test.js`: Full integration suite testing all endpoints, CORS allow/reject, concurrency locks, and error codes.
 
 ### Running Frontend Tests (4 Passing Tests)
 ```bash
 cd client
 npm test
 ```
+Covers:
+- `ScoreBadge.test.jsx`: Accurate rendering of score badges and ranks.
+- `ClueCard.test.jsx`: Discovered vs undiscovered state, examine action triggering.
 
 ---
 

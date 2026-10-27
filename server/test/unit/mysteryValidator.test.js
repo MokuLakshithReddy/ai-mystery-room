@@ -6,7 +6,7 @@ import {
 } from '../../services/mysteryValidator.js';
 import { FALLBACK_MYSTERIES } from '../../services/fallbackLibrary.js';
 
-describe('Mystery Validator & Difficulty Rules', () => {
+describe('Mystery Validator & Structural Consistency Rules', () => {
   it('enforces exact configuration counts across all difficulties', () => {
     expect(DIFFICULTY_CONFIG.easy).toEqual({
       name: 'easy',
@@ -54,7 +54,6 @@ describe('Mystery Validator & Difficulty Rules', () => {
 
   it('rejects mystery with incorrect suspect count for specified difficulty', () => {
     const modified = JSON.parse(JSON.stringify(FALLBACK_MYSTERIES.easy[0]));
-    // Remove one suspect (easy requires 3, this leaves 2)
     modified.suspects.pop();
 
     const result = validateMystery(modified, 'easy');
@@ -64,7 +63,6 @@ describe('Mystery Validator & Difficulty Rules', () => {
 
   it('rejects mystery with incorrect clues count', () => {
     const modified = JSON.parse(JSON.stringify(FALLBACK_MYSTERIES.medium[0]));
-    // Remove one clue (medium requires 7, leaves 6)
     modified.clues.pop();
 
     const result = validateMystery(modified, 'medium');
@@ -97,5 +95,33 @@ describe('Mystery Validator & Difficulty Rules', () => {
     const result = validateMystery(modified, 'hard');
     expect(result.valid).toBe(false);
     expect(result.errors.some(e => e.includes('crucialClueIds references non-existent clue ID'))).toBe(true);
+  });
+
+  it('rejects mystery with culprit name mismatch against suspect entity', () => {
+    const modified = JSON.parse(JSON.stringify(FALLBACK_MYSTERIES.easy[0]));
+    modified.solution.culpritName = 'Completely Different Name';
+
+    const result = validateMystery(modified, 'easy');
+    expect(result.valid).toBe(false);
+    expect(result.errors.some(e => e.includes('Culprit name mismatch'))).toBe(true);
+  });
+
+  it('rejects mystery with empty crucial clues list', () => {
+    const modified = JSON.parse(JSON.stringify(FALLBACK_MYSTERIES.easy[0]));
+    modified.solution.crucialClueIds = [];
+
+    const result = validateMystery(modified, 'easy');
+    expect(result.valid).toBe(false);
+    expect(result.errors.some(e => e.includes('crucial clue'))).toBe(true);
+  });
+
+  it('rejects mystery where clues lack spatial location diversity', () => {
+    const modified = JSON.parse(JSON.stringify(FALLBACK_MYSTERIES.easy[0]));
+    // Set all clues to the exact same room
+    modified.clues.forEach(c => { c.location = 'The Basement'; });
+
+    const result = validateMystery(modified, 'easy');
+    expect(result.valid).toBe(false);
+    expect(result.errors.some(e => e.includes('spatial diversity'))).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import React from 'react';
 import ClueCard from '../components/ClueCard';
@@ -28,12 +28,14 @@ describe('ClueCard Component', () => {
     expect(screen.getByText('Examine Evidence (+5 Pts)')).toBeInTheDocument();
   });
 
-  it('calls onDiscover when examine button is clicked', () => {
+  it('calls onDiscover when examine button is clicked', async () => {
     const onDiscover = vi.fn();
     render(<ClueCard clue={undiscoveredClue} onDiscover={onDiscover} />);
 
     const btn = screen.getByText('Examine Evidence (+5 Pts)');
-    fireEvent.click(btn);
+    await act(async () => {
+      fireEvent.click(btn);
+    });
     expect(onDiscover).toHaveBeenCalledWith('clue_1');
   });
 

@@ -17,6 +17,37 @@ describe('Cases REST API Integration Tests', () => {
     expect(typeof res.body.uptime).toBe('number');
   });
 
+  describe('CORS Enforcement & Origin Control', () => {
+    it('allows requests from approved production frontend origin', async () => {
+      const res = await request(app)
+        .get('/api/health')
+        .set('Origin', 'https://client-tau-sable-95.vercel.app');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('https://client-tau-sable-95.vercel.app');
+    });
+
+    it('permits non-browser requests (missing Origin header)', async () => {
+      const res = await request(app).get('/api/health');
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects unauthorized browser origins in production mode', async () => {
+      const originalEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        const res = await request(app)
+          .get('/api/health')
+          .set('Origin', 'https://malicious-phishing-site.com');
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('CORS_FORBIDDEN');
+      } finally {
+        process.env.NODE_ENV = originalEnv;
+      }
+    });
+  });
+
   describe('POST /api/cases validation', () => {
     it('rejects premise shorter than 5 characters with 400', async () => {
       const res = await request(app)
@@ -24,7 +55,7 @@ describe('Cases REST API Integration Tests', () => {
         .send({ premise: 'Cold', difficulty: 'easy' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Premise is too short/);
+      expect(res.body.code).toBe('PREMISE_TOO_SHORT');
     });
 
     it('rejects premise longer than 300 characters with 400', async () => {
@@ -34,7 +65,7 @@ describe('Cases REST API Integration Tests', () => {
         .send({ premise: longPremise, difficulty: 'medium' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Premise is too long/);
+      expect(res.body.code).toBe('PREMISE_TOO_LONG');
     });
 
     it('rejects non-string premise with 400', async () => {
@@ -43,7 +74,7 @@ describe('Cases REST API Integration Tests', () => {
         .send({ premise: 12345, difficulty: 'medium' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Premise must be a valid text string/);
+      expect(res.body.code).toBe('INVALID_PREMISE_TYPE');
     });
 
     it('rejects invalid or unsupported difficulty values with 400', async () => {
@@ -52,7 +83,7 @@ describe('Cases REST API Integration Tests', () => {
         .send({ premise: 'Mysterious theft at high noon', difficulty: 'impossible' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Invalid difficulty/);
+      expect(res.body.code).toBe('INVALID_DIFFICULTY');
     });
 
     it('creates an Easy case with exact counts (3 suspects, 5 clues, 2 hints)', async () => {
@@ -66,6 +97,7 @@ describe('Cases REST API Integration Tests', () => {
       expect(res.body.case.clues).toHaveLength(5);
       expect(res.body.case.hints).toHaveLength(2);
       expect(res.body.case.solution).toBeUndefined(); // Secrecy boundary
+      expect(res.body.case.culprit).toBeUndefined();
     });
 
     it('creates a Medium case with exact counts (4 suspects, 7 clues, 3 hints)', async () => {
@@ -79,6 +111,7 @@ describe('Cases REST API Integration Tests', () => {
       expect(res.body.case.clues).toHaveLength(7);
       expect(res.body.case.hints).toHaveLength(3);
       expect(res.body.case.solution).toBeUndefined();
+      expect(res.body.case.culprit).toBeUndefined();
 
       // Save for subsequent gameplay tests
       createdCaseId = res.body.case._id;
@@ -98,6 +131,7 @@ describe('Cases REST API Integration Tests', () => {
       expect(res.body.case.clues).toHaveLength(9);
       expect(res.body.case.hints).toHaveLength(3);
       expect(res.body.case.solution).toBeUndefined();
+      expect(res.body.case.culprit).toBeUndefined();
     });
   });
 
@@ -113,6 +147,7 @@ describe('Cases REST API Integration Tests', () => {
       expect(res.status).toBe(200);
       expect(res.body.case._id).toBe(createdCaseId);
       expect(res.body.case.solution).toBeUndefined(); // Secrecy boundary
+      expect(res.body.case.culprit).toBeUndefined();
       expect(res.body.case.clues[0].description).toBeUndefined(); // Undiscovered clue masked
     });
   });
@@ -165,7 +200,7 @@ describe('Cases REST API Integration Tests', () => {
     it('returns 400: solution remains sealed until formal accusation', async () => {
       const res = await request(app).get(`/api/cases/${createdCaseId}/result`);
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/still active/i);
+      expect(res.body.code).toBe('CASE_STILL_ACTIVE');
     });
   });
 
@@ -216,7 +251,46 @@ describe('Cases REST API Integration Tests', () => {
         .send({ suspectId: 'suspect_1' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/already completed/i);
+      expect(res.body.code).toBe('CASE_ALREADY_COMPLETED');
+    });
+  });
+
+  describe('Concurrent Actions & Race Condition Immunity', () => {
+    it('safely serializes concurrent hint requests on an active case', async () => {
+      // Create fresh case for concurrency testing
+      const newCaseRes = await request(app)
+        .post('/api/cases')
+        .send({ premise: 'Concurrent test for serial hint requests', difficulty: 'easy' });
+      const testCaseId = newCaseRes.body.case._id;
+
+      // Fire 2 simultaneous hint requests
+      const [h1, h2] = await Promise.all([
+        request(app).post(`/api/cases/${testCaseId}/hints`),
+        request(app).post(`/api/cases/${testCaseId}/hints`)
+      ]);
+
+      expect(h1.status).toBe(200);
+      expect(h2.status).toBe(200);
+      // Both hints unlocked without race corruption
+      expect(h1.body.hint.id).not.toBe(h2.body.hint.id);
+      expect(h2.body.hintsRemaining).toBe(0); // Easy has 2 hints total
+    });
+
+    it('ensures only ONE concurrent accusation succeeds and transitions the case', async () => {
+      const newCaseRes = await request(app)
+        .post('/api/cases')
+        .send({ premise: 'Concurrent test for simultaneous accusations', difficulty: 'easy' });
+      const testCaseId = newCaseRes.body.case._id;
+
+      // Fire 2 simultaneous accusations
+      const [acc1, acc2] = await Promise.all([
+        request(app).post(`/api/cases/${testCaseId}/accuse`).send({ suspectId: 'suspect_1' }),
+        request(app).post(`/api/cases/${testCaseId}/accuse`).send({ suspectId: 'suspect_2' })
+      ]);
+
+      const statuses = [acc1.status, acc2.status].sort();
+      // Exactly one succeeds (200), the other is rejected as already completed (400)
+      expect(statuses).toEqual([200, 400]);
     });
   });
 
@@ -240,6 +314,7 @@ describe('Cases REST API Integration Tests', () => {
       for (const c of res.body.cases) {
         if (c.status !== 'completed') {
           expect(c.solution).toBeUndefined();
+          expect(c.culprit).toBeUndefined();
         }
       }
     });

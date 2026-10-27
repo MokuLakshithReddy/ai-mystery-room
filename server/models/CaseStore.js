@@ -1,11 +1,34 @@
 import mongoose from 'mongoose';
 import { Case } from './Case.js';
 
-// Disable buffering so calls don't hang if MongoDB is disconnected
+// Disable buffering so calls fail fast if MongoDB is disconnected
 mongoose.set('bufferCommands', false);
 
-// In-memory cache for fast local lookup
+// In-memory cache for fast local lookup and read caching
 const inMemoryCases = new Map();
+
+// Concurrency mutex per caseId to serialize mutating operations
+const caseLocks = new Map();
+
+/**
+ * Execute an async function with an exclusive lock for the given case ID
+ */
+export async function withCaseLock(caseId, fn) {
+  const previous = caseLocks.get(caseId) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  caseLocks.set(caseId, current);
+
+  try {
+    await previous;
+    return await fn();
+  } finally {
+    release();
+    if (caseLocks.get(caseId) === current) {
+      caseLocks.delete(caseId);
+    }
+  }
+}
 
 // Cloud persistence credentials for serverless Vercel persistence
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -17,7 +40,26 @@ export const DIFFICULTY_BASE_POINTS = {
   hard: 200
 };
 
-function isMongoConnected() {
+/**
+ * Authoritative production score calculation
+ * Formula: max(0, basePoints + (discoveredClues * 5) - (unlockedHints * 10))
+ */
+export function calculateScore({ difficulty, isCorrect, discoveredCluesCount = 0, unlockedHintsCount = 0 }) {
+  const normalizedDiff = (difficulty || 'easy').toLowerCase().trim();
+  const basePoints = isCorrect ? (DIFFICULTY_BASE_POINTS[normalizedDiff] || 0) : 0;
+  const clueBonus = Math.max(0, discoveredCluesCount) * 5;
+  const hintPenalty = Math.max(0, unlockedHintsCount) * 10;
+  const totalScore = Math.max(0, basePoints + clueBonus - hintPenalty);
+
+  return {
+    basePoints,
+    clueBonus,
+    hintPenalty,
+    totalScore
+  };
+}
+
+export function isMongoConnected() {
   return mongoose.connection.readyState === 1;
 }
 
@@ -78,12 +120,59 @@ async function cloudListCases(limit = 10) {
   }
 }
 
+/**
+ * Enforce durable persistence to MongoDB Atlas or Cloud Store
+ * Throws DURABLE_PERSISTENCE_FAILED if neither succeeded.
+ */
+async function persistDurable(id, caseData, isNew = false) {
+  let persisted = false;
+
+  // 1. Try MongoDB if connected
+  if (isMongoConnected()) {
+    try {
+      if (isNew) {
+        const doc = new Case(caseData);
+        await doc.save();
+      } else {
+        await Case.replaceOne({ _id: id }, caseData, { upsert: true });
+      }
+      persisted = true;
+    } catch (err) {
+      console.warn('MongoDB durable persist error:', err.message);
+    }
+  }
+
+  // 2. Try Supabase Cloud Store
+  if (SUPABASE_URL && SUPABASE_KEY) {
+    const cloudOk = await cloudUpsertCase(id, caseData);
+    if (cloudOk) {
+      persisted = true;
+    }
+  }
+
+  // 3. Testing-only override (explicitly configured for isolated mocks)
+  if (!persisted && process.env.ALLOW_IN_MEMORY_FOR_TESTS === 'true') {
+    persisted = true;
+  }
+
+  if (!persisted) {
+    throw new Error('DURABLE_PERSISTENCE_FAILED: Unable to commit case to durable storage');
+  }
+
+  // Update memory cache on successful durable write
+  inMemoryCases.set(id, caseData);
+  return true;
+}
+
 export function sanitizeCaseForClient(caseObj) {
+  if (!caseObj) return null;
   const cloned = JSON.parse(JSON.stringify(caseObj));
 
-  // Strip solution if not completed
+  // Strip solution if case is active
   if (cloned.status !== 'completed') {
     delete cloned.solution;
+    delete cloned.culprit;
+    delete cloned.playerAccusation;
   }
 
   // Hide clue details if undiscovered
@@ -119,7 +208,7 @@ export function sanitizeCaseForClient(caseObj) {
 }
 
 /**
- * Save new case
+ * Save new case with guaranteed durable persistence
  */
 export async function saveNewCase(casePayload) {
   const id = new mongoose.Types.ObjectId().toString();
@@ -149,19 +238,8 @@ export async function saveNewCase(casePayload) {
     createdAt: new Date()
   };
 
-  // Try Mongo first if connected
-  if (isMongoConnected()) {
-    try {
-      const doc = new Case(caseData);
-      await doc.save();
-    } catch (err) {
-      console.warn('MongoDB save failed:', err.message);
-    }
-  }
-
-  // Persist to Cloud Store & Memory cache
-  inMemoryCases.set(id, caseData);
-  await cloudUpsertCase(id, caseData);
+  // Must persist durably before returning
+  await persistDurable(id, caseData, true);
 
   return sanitizeCaseForClient(caseData);
 }
@@ -169,7 +247,7 @@ export async function saveNewCase(casePayload) {
 /**
  * Find raw internal case by ID
  */
-async function getRawCase(id) {
+export async function getRawCase(id) {
   // Check memory cache first
   if (inMemoryCases.has(id)) {
     return inMemoryCases.get(id);
@@ -219,7 +297,7 @@ export async function getRecentCases(limit = 10) {
         .limit(limit)
         .select('-solution');
       if (cases && cases.length > 0) {
-        return cases.map(c => c.toClientJSON());
+        return cases.map(c => c.toClientJSON ? c.toClientJSON() : sanitizeCaseForClient(c));
       }
     } catch (err) {
       console.warn('MongoDB list failed:', err.message);
@@ -240,185 +318,151 @@ export async function getRecentCases(limit = 10) {
 }
 
 /**
- * Discover a clue
+ * Discover a clue - atomic and idempotent
  */
 export async function discoverCaseClue(caseId, clueId) {
-  const caseData = await getRawCase(caseId);
-  if (!caseData) return null;
-  if (caseData.status === 'completed') return { error: 'Case already completed' };
+  return withCaseLock(caseId, async () => {
+    const caseData = await getRawCase(caseId);
+    if (!caseData) return null;
+    if (caseData.status === 'completed') return { error: 'Case already completed' };
 
-  const clue = caseData.clues.find(c => c.id === clueId);
-  if (!clue) return null;
+    const clue = caseData.clues.find(c => c.id === clueId);
+    if (!clue) return null;
 
-  if (!clue.isDiscovered) {
-    clue.isDiscovered = true;
-    clue.discoveredAt = new Date();
-    caseData.score.clueBonus += 5;
-    caseData.score.totalScore = Math.max(0, caseData.score.basePoints + caseData.score.clueBonus - caseData.score.hintPenalty);
+    // Idempotent: If already discovered, do not award duplicate points
+    if (!clue.isDiscovered) {
+      clue.isDiscovered = true;
+      clue.discoveredAt = new Date();
 
-    // Save updates to Mongo if connected
-    if (isMongoConnected()) {
-      try {
-        await Case.updateOne(
-          { _id: caseId, 'clues.id': clueId },
-          { 
-            $set: { 
-              'clues.$.isDiscovered': true, 
-              'clues.$.discoveredAt': clue.discoveredAt,
-              'score.clueBonus': caseData.score.clueBonus,
-              'score.totalScore': caseData.score.totalScore
-            } 
-          }
-        );
-      } catch (err) {
-        console.warn('MongoDB clue update failed:', err.message);
-      }
+      const discoveredCount = caseData.clues.filter(c => c.isDiscovered).length;
+      const hintsUsedCount = caseData.hints.filter(h => h.isUnlocked).length;
+      const newScore = calculateScore({
+        difficulty: caseData.difficulty,
+        isCorrect: false, // In-progress bonus calculation
+        discoveredCluesCount: discoveredCount,
+        unlockedHintsCount: hintsUsedCount
+      });
+
+      caseData.score.clueBonus = newScore.clueBonus;
+      caseData.score.totalScore = newScore.totalScore;
+
+      // Persist durably
+      await persistDurable(caseId, caseData, false);
     }
 
-    // Save updates to cloud store and cache
-    inMemoryCases.set(caseId, caseData);
-    await cloudUpsertCase(caseId, caseData);
-  }
-
-  return {
-    clue: {
-      id: clue.id,
-      title: clue.title,
-      location: clue.location,
-      description: clue.description,
-      isDiscovered: true,
-      discoveredAt: clue.discoveredAt
-    },
-    currentScore: caseData.score.totalScore,
-    cluesDiscoveredCount: caseData.clues.filter(c => c.isDiscovered).length,
-    totalCluesCount: caseData.clues.length
-  };
+    return {
+      clue: {
+        id: clue.id,
+        title: clue.title,
+        location: clue.location,
+        description: clue.description,
+        isDiscovered: true,
+        discoveredAt: clue.discoveredAt
+      },
+      currentScore: caseData.score.totalScore,
+      cluesDiscoveredCount: caseData.clues.filter(c => c.isDiscovered).length,
+      totalCluesCount: caseData.clues.length
+    };
+  });
 }
 
 /**
- * Request a hint
+ * Request a hint - atomic progression
  */
 export async function requestCaseHint(caseId) {
-  const caseData = await getRawCase(caseId);
-  if (!caseData) return null;
-  if (caseData.status === 'completed') return { error: 'Case already completed' };
+  return withCaseLock(caseId, async () => {
+    const caseData = await getRawCase(caseId);
+    if (!caseData) return null;
+    if (caseData.status === 'completed') return { error: 'Case already completed' };
 
-  const nextHint = caseData.hints.find(h => !h.isUnlocked);
-  if (!nextHint) return { error: 'All hints declassified' };
+    const nextHint = caseData.hints.find(h => !h.isUnlocked);
+    if (!nextHint) return { error: 'All hints declassified' };
 
-  nextHint.isUnlocked = true;
-  nextHint.unlockedAt = new Date();
-  caseData.score.hintPenalty += 10;
-  caseData.score.totalScore = Math.max(0, caseData.score.basePoints + caseData.score.clueBonus - caseData.score.hintPenalty);
+    nextHint.isUnlocked = true;
+    nextHint.unlockedAt = new Date();
 
-  // Update Mongo if connected
-  if (isMongoConnected()) {
-    try {
-      await Case.updateOne(
-        { _id: caseId, 'hints.id': nextHint.id },
-        { 
-          $set: { 
-            'hints.$.isUnlocked': true, 
-            'hints.$.unlockedAt': nextHint.unlockedAt,
-            'score.hintPenalty': caseData.score.hintPenalty,
-            'score.totalScore': caseData.score.totalScore
-          } 
-        }
-      );
-    } catch (err) {
-      console.warn('MongoDB hint update failed:', err.message);
-    }
-  }
+    const discoveredCount = caseData.clues.filter(c => c.isDiscovered).length;
+    const hintsUsedCount = caseData.hints.filter(h => h.isUnlocked).length;
+    const newScore = calculateScore({
+      difficulty: caseData.difficulty,
+      isCorrect: false,
+      discoveredCluesCount: discoveredCount,
+      unlockedHintsCount: hintsUsedCount
+    });
 
-  // Update cloud store and cache
-  inMemoryCases.set(caseId, caseData);
-  await cloudUpsertCase(caseId, caseData);
+    caseData.score.hintPenalty = newScore.hintPenalty;
+    caseData.score.totalScore = newScore.totalScore;
 
-  return {
-    hint: {
-      id: nextHint.id,
-      text: nextHint.text,
-      isUnlocked: true,
-      unlockedAt: nextHint.unlockedAt
-    },
-    hintsRemaining: caseData.hints.filter(h => !h.isUnlocked).length,
-    currentScore: caseData.score.totalScore
-  };
+    // Persist durably
+    await persistDurable(caseId, caseData, false);
+
+    return {
+      hint: {
+        id: nextHint.id,
+        text: nextHint.text,
+        isUnlocked: true,
+        unlockedAt: nextHint.unlockedAt
+      },
+      hintsRemaining: caseData.hints.filter(h => !h.isUnlocked).length,
+      currentScore: caseData.score.totalScore
+    };
+  });
 }
 
 /**
- * Submit accusation
+ * Submit accusation - atomic single transition from active to completed
  */
 export async function submitCaseAccusation(caseId, suspectId, rationale) {
-  const caseData = await getRawCase(caseId);
-  if (!caseData) return null;
-  if (caseData.status === 'completed') return { error: 'Case already completed' };
+  return withCaseLock(caseId, async () => {
+    const caseData = await getRawCase(caseId);
+    if (!caseData) return null;
+    if (caseData.status === 'completed') return { error: 'Case already completed' };
 
-  const suspect = caseData.suspects.find(s => s.id === suspectId);
-  if (!suspect) return null;
+    const suspect = caseData.suspects.find(s => s.id === suspectId);
+    if (!suspect) return null;
 
-  const isCorrect = suspectId === caseData.solution.culpritId;
-  const basePoints = isCorrect ? (DIFFICULTY_BASE_POINTS[caseData.difficulty] || 150) : 0;
-  const discoveredCluesCount = caseData.clues.filter(c => c.isDiscovered).length;
-  const clueBonus = discoveredCluesCount * 5;
-  const unlockedHintsCount = caseData.hints.filter(h => h.isUnlocked).length;
-  const hintPenalty = unlockedHintsCount * 10;
-  const totalScore = Math.max(0, basePoints + clueBonus - hintPenalty);
+    // Transition from active to completed
+    const isCorrect = suspectId === caseData.solution.culpritId;
+    const discoveredCluesCount = caseData.clues.filter(c => c.isDiscovered).length;
+    const unlockedHintsCount = caseData.hints.filter(h => h.isUnlocked).length;
 
-  caseData.status = 'completed';
-  caseData.completedAt = new Date();
-  caseData.playerAccusation = {
-    accusedSuspectId: suspectId,
-    rationale: rationale || '',
-    submittedAt: new Date(),
-    isCorrect
-  };
-  caseData.score = {
-    basePoints,
-    clueBonus,
-    hintPenalty,
-    totalScore
-  };
+    const finalScoreObj = calculateScore({
+      difficulty: caseData.difficulty,
+      isCorrect,
+      discoveredCluesCount,
+      unlockedHintsCount
+    });
 
-  // Update Mongo if connected
-  if (isMongoConnected()) {
-    try {
-      await Case.updateOne(
-        { _id: caseId },
-        { 
-          $set: { 
-            status: 'completed',
-            completedAt: caseData.completedAt,
-            playerAccusation: caseData.playerAccusation,
-            score: caseData.score
-          } 
-        }
-      );
-    } catch (err) {
-      console.warn('MongoDB accusation update failed:', err.message);
-    }
-  }
+    caseData.status = 'completed';
+    caseData.completedAt = new Date();
+    caseData.playerAccusation = {
+      accusedSuspectId: suspectId,
+      rationale: rationale || '',
+      submittedAt: new Date(),
+      isCorrect
+    };
+    caseData.score = finalScoreObj;
 
-  // Update cloud store and cache
-  inMemoryCases.set(caseId, caseData);
-  await cloudUpsertCase(caseId, caseData);
+    // Persist durably
+    await persistDurable(caseId, caseData, false);
 
-  return {
-    isCorrect,
-    accusedSuspect: {
-      id: suspect.id,
-      name: suspect.name,
-      role: suspect.role
-    },
-    culprit: {
-      id: caseData.solution.culpritId,
-      name: caseData.solution.culpritName,
-    },
-    motiveExplanation: caseData.solution.motiveExplanation,
-    solutionBreakdown: caseData.solution.solutionBreakdown,
-    crucialClueIds: caseData.solution.crucialClueIds,
-    score: caseData.score
-  };
+    return {
+      isCorrect,
+      accusedSuspect: {
+        id: suspect.id,
+        name: suspect.name,
+        role: suspect.role
+      },
+      culprit: {
+        id: caseData.solution.culpritId,
+        name: caseData.solution.culpritName,
+      },
+      motiveExplanation: caseData.solution.motiveExplanation,
+      solutionBreakdown: caseData.solution.solutionBreakdown,
+      crucialClueIds: caseData.solution.crucialClueIds,
+      score: caseData.score
+    };
+  });
 }
 
 /**

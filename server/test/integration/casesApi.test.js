@@ -1,12 +1,16 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
-import app from '../../index.js';
+import app, { connectDB } from '../../index.js';
 
 describe('Cases REST API Integration Tests', () => {
   let createdCaseId;
   let suspectsList = [];
   let cluesList = [];
   let hintsList = [];
+
+  beforeAll(async () => {
+    await connectDB();
+  });
 
   it('GET /api/health reports healthy system status', async () => {
     const res = await request(app).get('/api/health');

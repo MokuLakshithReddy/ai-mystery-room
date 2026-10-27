@@ -118,6 +118,14 @@ app.use('/api/cases', async (req, res, next) => {
  * Verifies actual dependency connectivity and database reachability before reporting healthy
  */
 app.get('/api/health', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await connectDB();
+    } catch (err) {
+      // Connect error handled below
+    }
+  }
+
   let isMongoReady = false;
   let mongoPingError = null;
 

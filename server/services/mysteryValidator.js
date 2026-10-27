@@ -37,7 +37,7 @@ export const SuspectSchema = z.object({
   id: z.string().min(1, 'Suspect ID is required'),
   name: z.string().min(2, 'Suspect name must be at least 2 characters'),
   role: z.string().min(2, 'Suspect role must be at least 2 characters'),
-  alibi: z.string().min(5, 'Suspect alibi must be detailed'),
+  alibi: z.string().min(10, 'Suspect alibi must be detailed and specify claimed location/activity'),
   motive: z.string().min(5, 'Suspect motive must be detailed'),
   relationship: z.string().min(2, 'Suspect relationship is required'),
   demeanor: z.string().min(2, 'Suspect demeanor notes required')
@@ -47,19 +47,19 @@ export const ClueSchema = z.object({
   id: z.string().min(1, 'Clue ID is required'),
   title: z.string().min(2, 'Clue title must be at least 2 characters'),
   location: z.string().min(2, 'Clue location is required'),
-  description: z.string().min(10, 'Clue description must be at least 10 characters')
+  description: z.string().min(15, 'Clue description must be detailed physical/testimonial evidence')
 });
 
 export const HintSchema = z.object({
   id: z.string().min(1, 'Hint ID is required'),
-  text: z.string().min(10, 'Hint text must be at least 10 characters')
+  text: z.string().min(15, 'Hint text must provide meaningful investigative guidance')
 });
 
 export const SolutionSchema = z.object({
   culpritId: z.string().min(1, 'Culprit ID is required'),
   culpritName: z.string().min(2, 'Culprit name is required'),
-  motiveExplanation: z.string().min(15, 'Motive explanation must be at least 15 characters'),
-  solutionBreakdown: z.string().min(30, 'Solution breakdown must be at least 30 characters'),
+  motiveExplanation: z.string().min(20, 'Motive explanation must be at least 20 characters'),
+  solutionBreakdown: z.string().min(50, 'Solution breakdown must be at least 50 characters'),
   crucialClueIds: z.array(z.string()).min(1, 'At least one crucial clue ID is required')
 });
 
@@ -68,7 +68,7 @@ export const StorySchema = z.object({
   victim: z.string().min(2, 'Victim name must be at least 2 characters'),
   crimeScene: z.string().min(3, 'Crime scene must be at least 3 characters'),
   crimeType: z.string().min(3, 'Crime type must be at least 3 characters'),
-  timeOfCrime: z.string().min(2, 'Time of crime is required')
+  timeOfCrime: z.string().min(3, 'Time of crime must specify an actionable timeline')
 });
 
 export const RawMysterySchema = z.object({
@@ -181,6 +181,13 @@ export function validateMystery(mystery, difficulty) {
     if (!culpritSuspect.motive || culpritSuspect.motive.trim().length < 5) {
       errors.push(`Culprit suspect "${culpritSuspect.name}" lacks a detailed motive.`);
     }
+
+    // Check alibi consistency: Solution breakdown must dismantle or explain the culprit's opportunity
+    const breakdownLower = data.solution.solutionBreakdown.toLowerCase();
+    const culpritFirstWord = culpritSuspect.name.split(' ')[0].toLowerCase();
+    if (!breakdownLower.includes(culpritFirstWord) && !breakdownLower.includes('culprit')) {
+      errors.push('Solution breakdown must explicitly reference the perpetrator actions.');
+    }
   }
 
   // 5. Crucial clues discoverability and evidence trail check
@@ -194,7 +201,6 @@ export function validateMystery(mystery, difficulty) {
           `Solution crucialClueIds references non-existent clue ID "${crucialId}".`
         );
       } else {
-        // Crucial clue must have substantive physical or testimonial evidence
         if (referencedClue.description.length < 15) {
           errors.push(
             `Crucial clue "${crucialId}" description is too brief to substantiate the crime.`

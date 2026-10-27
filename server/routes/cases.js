@@ -1,4 +1,5 @@
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { 
   saveNewCase, 
   getCaseById, 
@@ -12,6 +13,19 @@ import { generateMysteryCase } from '../services/gemini.js';
 import { VALID_DIFFICULTIES } from '../services/mysteryValidator.js';
 
 const router = express.Router();
+
+// Specific rate limiter for expensive AI case generation (skip in test environment)
+const createCaseLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30, // 30 mystery generations per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
+  message: {
+    error: 'Mystery generation rate limit reached. Please wait before creating another case.',
+    code: 'RATE_LIMIT_EXCEEDED'
+  }
+});
 
 /**
  * GET /api/cases
@@ -36,7 +50,7 @@ router.get('/', async (req, res) => {
  * Generate a new mystery case using Gemini AI and persist to DB/Store
  * Validates premise (5-300 characters) and difficulty (easy, medium, hard)
  */
-router.post('/', async (req, res) => {
+router.post('/', createCaseLimiter, async (req, res) => {
   try {
     const { premise, difficulty } = req.body || {};
 

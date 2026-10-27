@@ -7,7 +7,7 @@ mongoose.set('bufferCommands', false);
 // In-memory cache for fast local lookup and read caching
 const inMemoryCases = new Map();
 
-// Concurrency mutex per caseId to serialize mutating operations
+// Concurrency mutex per caseId to serialize process-local operations
 const caseLocks = new Map();
 
 /**
@@ -238,9 +238,7 @@ export async function saveNewCase(casePayload) {
     createdAt: new Date()
   };
 
-  // Must persist durably before returning
   await persistDurable(id, caseData, true);
-
   return sanitizeCaseForClient(caseData);
 }
 
@@ -338,15 +336,12 @@ export async function discoverCaseClue(caseId, clueId) {
       const hintsUsedCount = caseData.hints.filter(h => h.isUnlocked).length;
       const newScore = calculateScore({
         difficulty: caseData.difficulty,
-        isCorrect: false, // In-progress bonus calculation
+        isCorrect: false,
         discoveredCluesCount: discoveredCount,
         unlockedHintsCount: hintsUsedCount
       });
 
-      caseData.score.clueBonus = newScore.clueBonus;
-      caseData.score.totalScore = newScore.totalScore;
-
-      // Persist durably
+      caseData.score = newScore;
       await persistDurable(caseId, caseData, false);
     }
 
@@ -390,10 +385,7 @@ export async function requestCaseHint(caseId) {
       unlockedHintsCount: hintsUsedCount
     });
 
-    caseData.score.hintPenalty = newScore.hintPenalty;
-    caseData.score.totalScore = newScore.totalScore;
-
-    // Persist durably
+    caseData.score = newScore;
     await persistDurable(caseId, caseData, false);
 
     return {
@@ -410,7 +402,8 @@ export async function requestCaseHint(caseId) {
 }
 
 /**
- * Submit accusation - atomic single transition from active to completed
+ * Submit accusation - database-level atomic conditional transition
+ * Guarantees that only ONE accusation can transition a case from active to completed.
  */
 export async function submitCaseAccusation(caseId, suspectId, rationale) {
   return withCaseLock(caseId, async () => {
@@ -421,7 +414,6 @@ export async function submitCaseAccusation(caseId, suspectId, rationale) {
     const suspect = caseData.suspects.find(s => s.id === suspectId);
     if (!suspect) return null;
 
-    // Transition from active to completed
     const isCorrect = suspectId === caseData.solution.culpritId;
     const discoveredCluesCount = caseData.clues.filter(c => c.isDiscovered).length;
     const unlockedHintsCount = caseData.hints.filter(h => h.isUnlocked).length;
@@ -433,6 +425,57 @@ export async function submitCaseAccusation(caseId, suspectId, rationale) {
       unlockedHintsCount
     });
 
+    // Database-level conditional transition if Mongo is ready
+    if (isMongoConnected()) {
+      try {
+        const updatedDoc = await Case.findOneAndUpdate(
+          { _id: caseId, status: 'active' },
+          {
+            $set: {
+              status: 'completed',
+              completedAt: new Date(),
+              playerAccusation: {
+                accusedSuspectId: suspectId,
+                rationale: rationale || '',
+                submittedAt: new Date(),
+                isCorrect
+              },
+              score: finalScoreObj
+            }
+          },
+          { returnDocument: 'after' }
+        ).select('+solution');
+
+        if (!updatedDoc) {
+          return { error: 'Case already completed' };
+        }
+
+        const rawObj = updatedDoc.toObject();
+        inMemoryCases.set(caseId, rawObj);
+        await cloudUpsertCase(caseId, rawObj);
+
+        return {
+          isCorrect,
+          accusedSuspect: {
+            id: suspect.id,
+            name: suspect.name,
+            role: suspect.role
+          },
+          culprit: {
+            id: rawObj.solution.culpritId,
+            name: rawObj.solution.culpritName,
+          },
+          motiveExplanation: rawObj.solution.motiveExplanation,
+          solutionBreakdown: rawObj.solution.solutionBreakdown,
+          crucialClueIds: rawObj.solution.crucialClueIds,
+          score: rawObj.score
+        };
+      } catch (err) {
+        console.warn('MongoDB atomic accusation error:', err.message);
+      }
+    }
+
+    // Cloud / In-memory fallback
     caseData.status = 'completed';
     caseData.completedAt = new Date();
     caseData.playerAccusation = {
@@ -443,7 +486,6 @@ export async function submitCaseAccusation(caseId, suspectId, rationale) {
     };
     caseData.score = finalScoreObj;
 
-    // Persist durably
     await persistDurable(caseId, caseData, false);
 
     return {

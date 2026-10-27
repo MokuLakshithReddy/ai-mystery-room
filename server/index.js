@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
+import { rateLimit } from 'express-rate-limit';
 import casesRouter from './routes/cases.js';
 
 dotenv.config();
@@ -9,6 +10,18 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ai_mystery_room';
+
+// Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
 
 // Authoritative CORS Configuration
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -58,6 +71,20 @@ app.use(cors({
   credentials: true
 }));
 
+// Global API Rate Limiter: 300 requests/min to accommodate active gameplay
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
+  message: {
+    error: 'Too many requests, please try again after a minute.',
+    code: 'RATE_LIMIT_EXCEEDED'
+  }
+});
+app.use('/api', apiLimiter);
+
 // Request body size limit
 app.use(express.json({ limit: '1mb' }));
 
@@ -71,7 +98,7 @@ app.use((req, res, next) => {
 
 /**
  * Health & Dependency Status Endpoint
- * Reports process status, database driver/status, and AI provider availability
+ * Reports actual database connection status, persistence mechanism, and AI availability
  */
 app.get('/api/health', (req, res) => {
   const isMongoReady = mongoose.connection.readyState === 1;
@@ -86,6 +113,7 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
     database: {
+      connected: isMongoReady,
       status: isMongoReady ? 'connected' : 'cloud-persistent-store',
       type: isMongoReady ? 'mongodb' : 'supabase-store'
     },

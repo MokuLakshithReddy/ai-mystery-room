@@ -7,7 +7,8 @@
 ## 🌐 Live Production Deployments
 - **Web App (Frontend)**: [https://client-tau-sable-95.vercel.app](https://client-tau-sable-95.vercel.app)
 - **REST API (Backend)**: [https://server-beta-blond-45.vercel.app](https://server-beta-blond-45.vercel.app)
-- **API Healthcheck**: [https://server-beta-blond-45.vercel.app/api/health](https://server-beta-blond-45.vercel.app/api/health)
+- **API Health Check**: [https://server-beta-blond-45.vercel.app/api/health](https://server-beta-blond-45.vercel.app/api/health)
+- **GitHub Repository**: [https://github.com/MokuLakshithReddy/ai-mystery-room](https://github.com/MokuLakshithReddy/ai-mystery-room)
 
 ---
 
@@ -18,8 +19,10 @@
 - [Zero-Spoiler Security Model](#-zero-spoiler-security-model)
 - [Difficulty & Scoring System](#-difficulty--scoring-system)
 - [API Reference](#-api-reference)
+- [Automated Testing](#-automated-testing)
 - [Local Development Setup](#-local-development-setup)
 - [Deployment Instructions](#-deployment-instructions)
+- [Project Documentation](#-project-documentation)
 
 ---
 
@@ -41,13 +44,15 @@ Unlike static murder-mystery games, every case is generated dynamically with str
 - **React Router DOM v7**: Seamless navigation between Command Desk, Case Dispatcher, Investigation Room, and Results.
 - **Axios**: Configured client with centralized error interception.
 - **Lucide Icons**: Contextual detective iconography (fingerprint, magnifying glass, shield, skull, target).
+- **Vitest & React Testing Library**: Component testing suite.
 
 ### Backend (`/server`)
 - **Node.js & Express**: High-performance RESTful API with CORS and JSON parsing.
 - **MongoDB & Mongoose**: Object document mapping with custom security projection (`select: false` on solutions).
 - **Google Gen AI (`@google/genai`)**: Structured JSON outputs using `gemini-2.5-flash`.
-- **Zod**: Runtime schema validation of generated cases and client payloads.
-- **Smart Fallback Engine**: Ensures 100% playable uptime even when API keys are not supplied.
+- **Zod & Custom Validator**: Strict schema and logical consistency validation (`validateMystery`).
+- **Vitest & Supertest**: Full automated unit and integration test suite (39 tests).
+- **Multi-Tier Resilient Persistence**: Seamless durability across MongoDB, Supabase Cloud Store, and local memory cache.
 
 ---
 
@@ -78,17 +83,38 @@ $$\text{Total Score} = \max\left(0, (\text{Correct ? Base Bounty} : 0) + (5 \tim
 
 ---
 
+## 🧪 Automated Testing
+
+### Running Backend Tests (39 Passing Tests)
+```bash
+cd server
+npm test
+```
+Covers:
+- `mysteryValidator.test.js`: Exact suspect/clue/hint counts, ID uniqueness, culprit cross-referencing.
+- `scoring.test.js`: Base bounty calculations, clue bonuses, hint penalties, 0 floor limit.
+- `secrecy.test.js`: Active case sanitization, solution masking, clue description concealment.
+- `casesApi.test.js`: Full integration suite testing all endpoints, error codes, and validation.
+
+### Running Frontend Tests (4 Passing Tests)
+```bash
+cd client
+npm test
+```
+
+---
+
 ## 📡 API Reference
 
 ### Cases
-- `POST /api/cases` — Generate a new mystery case (Body: `{ premise, difficulty }`).
-- `GET /api/cases/:id` — Retrieve active sanitized case file.
-- `POST /api/cases/:id/clues/:clueId/discover` — Examine evidence and claim +5 points.
+- `POST /api/cases` — Generate a new mystery case (Body: `{ premise, difficulty }`). Validates premise (5-300 characters) and difficulty (`easy`, `medium`, `hard`).
+- `GET /api/cases/:id` — Retrieve active sanitized case file (solution stripped, unexamined clue descriptions masked).
+- `POST /api/cases/:id/clues/:clueId/discover` — Examine evidence and claim +5 points (idempotent).
 - `POST /api/cases/:id/hints` — Unlock next forensic hint with a -10 point penalty.
 - `POST /api/cases/:id/accuse` — Submit official accusation (Body: `{ suspectId, rationale }`).
 - `GET /api/cases/:id/result` — Retrieve full declassified case solution and scorecard.
 - `GET /api/cases` — List recent open/closed cases.
-- `GET /api/health` — Service healthcheck and database connectivity.
+- `GET /api/health` — Service healthcheck, database status, and AI provider status.
 
 ---
 
@@ -96,27 +122,30 @@ $$\text{Total Score} = \max\left(0, (\text{Correct ? Base Bounty} : 0) + (5 \tim
 
 ### 1. Prerequisites
 - Node.js v18+ LTS
-- Local MongoDB running on `mongodb://127.0.0.1:27017`
+- Local MongoDB running on `mongodb://127.0.0.1:27017` (or cloud store)
 
 ### 2. Backend Setup
 ```bash
 cd server
 npm install
-# Configure server/.env
-npm run dev
+npm test
+npm start
 ```
 
 ### 3. Frontend Setup
 ```bash
 cd client
 npm install
+npm test
 npm run dev
 ```
 Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ---
 
-## 🚀 Deployment
-Both frontend and backend are configured for zero-config Vercel deployment:
-- **Client**: `npx vercel --prod`
-- **Server**: `npx vercel --prod`
+## 📚 Project Documentation
+- [`SPEC.md`](SPEC.md) — Technical Specification Document & Architectural Blueprint
+- [`TESTING.md`](TESTING.md) — Comprehensive Test Guide & Acceptance Matrix
+- [`DEPLOYMENT.md`](DEPLOYMENT.md) — Production Setup & Cloud Configuration
+- [`SECURITY.md`](SECURITY.md) — Zero-Knowledge Security Policy & Data Isolation
+- [`AI_MYSTERY_ROOM_COMPLETION_PLAN.md`](AI_MYSTERY_ROOM_COMPLETION_PLAN.md) — Verified Completion Checklist

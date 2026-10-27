@@ -11,7 +11,7 @@ const inMemoryCases = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const DIFFICULTY_BASE_POINTS = {
+export const DIFFICULTY_BASE_POINTS = {
   easy: 100,
   medium: 150,
   hard: 200
@@ -23,6 +23,7 @@ function isMongoConnected() {
 
 // Cloud persistence helpers using native fetch
 async function cloudUpsertCase(id, caseData) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return false;
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/ai_mystery_cases`, {
       method: 'POST',
@@ -42,6 +43,7 @@ async function cloudUpsertCase(id, caseData) {
 }
 
 async function cloudGetCase(id) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/ai_mystery_cases?id=eq.${id}&select=data`, {
       headers: {
@@ -59,6 +61,7 @@ async function cloudGetCase(id) {
 }
 
 async function cloudListCases(limit = 10) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/ai_mystery_cases?select=data&order=created_at.desc&limit=${limit}`, {
       headers: {

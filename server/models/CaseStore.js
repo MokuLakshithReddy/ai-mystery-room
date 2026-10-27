@@ -4,8 +4,16 @@ import { Case } from './Case.js';
 // Disable buffering so calls fail fast if MongoDB is disconnected
 mongoose.set('bufferCommands', false);
 
-// In-memory cache for fast local lookup and read caching
+// In-memory read-cache (invalidated on state changes)
 const inMemoryCases = new Map();
+
+/**
+ * Clear the local in-memory cache
+ * Used to test durable persistence across application reboots
+ */
+export function clearLocalCache() {
+  inMemoryCases.clear();
+}
 
 // Concurrency mutex per caseId to serialize process-local operations
 const caseLocks = new Map();
@@ -75,7 +83,7 @@ async function cloudUpsertCase(id, caseData) {
         'Content-Type': 'application/json',
         'Prefer': 'resolution=merge-duplicates'
       },
-      body: JSON.stringify({ id, data: caseData })
+      body: JSON.stringify({ id, data: caseData, updated_at: new Date().toISOString() })
     });
     return res.ok;
   } catch (err) {
@@ -244,14 +252,10 @@ export async function saveNewCase(casePayload) {
 
 /**
  * Find raw internal case by ID
+ * Always consults the authoritative database first so cross-instance updates are never shadowed
  */
 export async function getRawCase(id) {
-  // Check memory cache first
-  if (inMemoryCases.has(id)) {
-    return inMemoryCases.get(id);
-  }
-
-  // Check Mongo
+  // 1. Check MongoDB first if connected for fresh cross-instance state
   if (isMongoConnected()) {
     try {
       const found = await Case.findById(id).select('+solution');
@@ -265,11 +269,16 @@ export async function getRawCase(id) {
     }
   }
 
-  // Check Cloud Store
+  // 2. Check Cloud Store
   const cloudData = await cloudGetCase(id);
   if (cloudData) {
     inMemoryCases.set(id, cloudData);
     return cloudData;
+  }
+
+  // 3. Fallback to memory cache only when offline/testing
+  if (inMemoryCases.has(id)) {
+    return inMemoryCases.get(id);
   }
 
   return null;
@@ -316,10 +325,83 @@ export async function getRecentCases(limit = 10) {
 }
 
 /**
- * Discover a clue - atomic and idempotent
+ * Discover a clue - database-level atomic conditional update
+ * Guarantees cross-instance idempotency and prevents concurrent score corruption.
  */
 export async function discoverCaseClue(caseId, clueId) {
   return withCaseLock(caseId, async () => {
+    // 1. MongoDB atomic conditional update
+    if (isMongoConnected()) {
+      try {
+        const currentDoc = await Case.findById(caseId);
+        if (!currentDoc) return null;
+        if (currentDoc.status === 'completed') return { error: 'Case already completed' };
+
+        const targetClue = currentDoc.clues.find(c => c.id === clueId);
+        if (!targetClue) return null;
+
+        // If already discovered, return immediately with current state (idempotent, no double points)
+        if (targetClue.isDiscovered) {
+          return {
+            clue: {
+              id: targetClue.id,
+              title: targetClue.title,
+              location: targetClue.location,
+              description: targetClue.description,
+              isDiscovered: true,
+              discoveredAt: targetClue.discoveredAt
+            },
+            currentScore: currentDoc.score.totalScore,
+            cluesDiscoveredCount: currentDoc.clues.filter(c => c.isDiscovered).length,
+            totalCluesCount: currentDoc.clues.length
+          };
+        }
+
+        // Atomically update ONLY if not yet discovered
+        const updatedDoc = await Case.findOneAndUpdate(
+          {
+            _id: caseId,
+            status: 'active',
+            clues: { $elemMatch: { id: clueId, isDiscovered: false } }
+          },
+          {
+            $set: {
+              'clues.$.isDiscovered': true,
+              'clues.$.discoveredAt': new Date()
+            },
+            $inc: {
+              'score.clueBonus': 5,
+              'score.totalScore': 5
+            }
+          },
+          { returnDocument: 'after' }
+        ).select('+solution');
+
+        const finalDoc = updatedDoc || (await Case.findById(caseId).select('+solution'));
+        const rawObj = finalDoc.toObject();
+        inMemoryCases.set(caseId, rawObj);
+        await cloudUpsertCase(caseId, rawObj);
+
+        const discovered = rawObj.clues.find(c => c.id === clueId);
+        return {
+          clue: {
+            id: discovered.id,
+            title: discovered.title,
+            location: discovered.location,
+            description: discovered.description,
+            isDiscovered: true,
+            discoveredAt: discovered.discoveredAt
+          },
+          currentScore: rawObj.score.totalScore,
+          cluesDiscoveredCount: rawObj.clues.filter(c => c.isDiscovered).length,
+          totalCluesCount: rawObj.clues.length
+        };
+      } catch (err) {
+        console.warn('MongoDB atomic clue discovery error:', err.message);
+      }
+    }
+
+    // 2. Cloud store / In-memory fallback
     const caseData = await getRawCase(caseId);
     if (!caseData) return null;
     if (caseData.status === 'completed') return { error: 'Case already completed' };
@@ -327,7 +409,6 @@ export async function discoverCaseClue(caseId, clueId) {
     const clue = caseData.clues.find(c => c.id === clueId);
     if (!clue) return null;
 
-    // Idempotent: If already discovered, do not award duplicate points
     if (!clue.isDiscovered) {
       clue.isDiscovered = true;
       clue.discoveredAt = new Date();
@@ -362,10 +443,72 @@ export async function discoverCaseClue(caseId, clueId) {
 }
 
 /**
- * Request a hint - atomic progression
+ * Request a hint - database-level atomic conditional progression
  */
 export async function requestCaseHint(caseId) {
   return withCaseLock(caseId, async () => {
+    // 1. MongoDB atomic conditional update
+    if (isMongoConnected()) {
+      try {
+        const currentDoc = await Case.findById(caseId);
+        if (!currentDoc) return null;
+        if (currentDoc.status === 'completed') return { error: 'Case already completed' };
+
+        const nextHint = currentDoc.hints.find(h => !h.isUnlocked);
+        if (!nextHint) return { error: 'All hints declassified' };
+
+        // Atomically claim the specific locked hint
+        const updatedDoc = await Case.findOneAndUpdate(
+          {
+            _id: caseId,
+            status: 'active',
+            hints: { $elemMatch: { id: nextHint.id, isUnlocked: false } }
+          },
+          {
+            $set: {
+              'hints.$.isUnlocked': true,
+              'hints.$.unlockedAt': new Date()
+            },
+            $inc: {
+              'score.hintPenalty': 10
+            }
+          },
+          { returnDocument: 'after' }
+        ).select('+solution');
+
+        if (!updatedDoc) {
+          // Another instance claimed this hint simultaneously; retry to claim the next one
+          return requestCaseHint(caseId);
+        }
+
+        // Recompute floored total score
+        const newTotal = Math.max(0, updatedDoc.score.basePoints + updatedDoc.score.clueBonus - updatedDoc.score.hintPenalty);
+        if (updatedDoc.score.totalScore !== newTotal) {
+          await Case.updateOne({ _id: caseId }, { $set: { 'score.totalScore': newTotal } });
+          updatedDoc.score.totalScore = newTotal;
+        }
+
+        const rawObj = updatedDoc.toObject();
+        inMemoryCases.set(caseId, rawObj);
+        await cloudUpsertCase(caseId, rawObj);
+
+        const unlocked = rawObj.hints.find(h => h.id === nextHint.id);
+        return {
+          hint: {
+            id: unlocked.id,
+            text: unlocked.text,
+            isUnlocked: true,
+            unlockedAt: unlocked.unlockedAt
+          },
+          hintsRemaining: rawObj.hints.filter(h => !h.isUnlocked).length,
+          currentScore: rawObj.score.totalScore
+        };
+      } catch (err) {
+        console.warn('MongoDB atomic hint request error:', err.message);
+      }
+    }
+
+    // 2. Cloud store / In-memory fallback
     const caseData = await getRawCase(caseId);
     if (!caseData) return null;
     if (caseData.status === 'completed') return { error: 'Case already completed' };
@@ -407,45 +550,49 @@ export async function requestCaseHint(caseId) {
  */
 export async function submitCaseAccusation(caseId, suspectId, rationale) {
   return withCaseLock(caseId, async () => {
-    const caseData = await getRawCase(caseId);
-    if (!caseData) return null;
-    if (caseData.status === 'completed') return { error: 'Case already completed' };
-
-    const suspect = caseData.suspects.find(s => s.id === suspectId);
-    if (!suspect) return null;
-
-    const isCorrect = suspectId === caseData.solution.culpritId;
-    const discoveredCluesCount = caseData.clues.filter(c => c.isDiscovered).length;
-    const unlockedHintsCount = caseData.hints.filter(h => h.isUnlocked).length;
-
-    const finalScoreObj = calculateScore({
-      difficulty: caseData.difficulty,
-      isCorrect,
-      discoveredCluesCount,
-      unlockedHintsCount
-    });
-
-    // Database-level conditional transition if Mongo is ready
+    // 1. MongoDB atomic conditional transition
     if (isMongoConnected()) {
       try {
+        const rawExisting = await Case.findById(caseId).select('+solution');
+        if (!rawExisting) return null;
+        if (rawExisting.status === 'completed') return { error: 'Case already completed' };
+
+        const suspect = rawExisting.suspects.find(s => s.id === suspectId);
+        if (!suspect) return null;
+
+        const isCorrect = suspectId === rawExisting.solution.culpritId;
+        const discoveredCluesCount = rawExisting.clues.filter(c => c.isDiscovered).length;
+        const unlockedHintsCount = rawExisting.hints.filter(h => h.isUnlocked).length;
+
+        const finalScoreObj = calculateScore({
+          difficulty: rawExisting.difficulty,
+          isCorrect,
+          discoveredCluesCount,
+          unlockedHintsCount
+        });
+
+        const playerAccusation = {
+          accusedSuspectId: suspectId,
+          rationale: rationale || '',
+          submittedAt: new Date(),
+          isCorrect
+        };
+
+        // Database-level conditional transition: requires status === 'active'
         const updatedDoc = await Case.findOneAndUpdate(
           { _id: caseId, status: 'active' },
           {
             $set: {
               status: 'completed',
               completedAt: new Date(),
-              playerAccusation: {
-                accusedSuspectId: suspectId,
-                rationale: rationale || '',
-                submittedAt: new Date(),
-                isCorrect
-              },
+              playerAccusation,
               score: finalScoreObj
             }
           },
           { returnDocument: 'after' }
         ).select('+solution');
 
+        // If updatedDoc is null, another instance transitioned this case concurrently!
         if (!updatedDoc) {
           return { error: 'Case already completed' };
         }
@@ -475,7 +622,25 @@ export async function submitCaseAccusation(caseId, suspectId, rationale) {
       }
     }
 
-    // Cloud / In-memory fallback
+    // 2. Cloud store / In-memory fallback
+    const caseData = await getRawCase(caseId);
+    if (!caseData) return null;
+    if (caseData.status === 'completed') return { error: 'Case already completed' };
+
+    const suspect = caseData.suspects.find(s => s.id === suspectId);
+    if (!suspect) return null;
+
+    const isCorrect = suspectId === caseData.solution.culpritId;
+    const discoveredCluesCount = caseData.clues.filter(c => c.isDiscovered).length;
+    const unlockedHintsCount = caseData.hints.filter(h => h.isUnlocked).length;
+
+    const finalScoreObj = calculateScore({
+      difficulty: caseData.difficulty,
+      isCorrect,
+      discoveredCluesCount,
+      unlockedHintsCount
+    });
+
     caseData.status = 'completed';
     caseData.completedAt = new Date();
     caseData.playerAccusation = {

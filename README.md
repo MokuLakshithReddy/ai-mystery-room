@@ -86,7 +86,7 @@ $$\text{Total Score} = \max\left(0, (\text{Correct ? Base Bounty} : 0) + (5 \tim
 
 ## 🧪 Automated Testing
 
-### Running Backend Tests (48 Passing Tests)
+### Running Backend Tests (50 Passing Tests)
 ```bash
 cd server
 npm test
@@ -96,6 +96,7 @@ Covers:
 - `scoring.test.js`: Direct testing of production `calculateScore` from `CaseStore.js`.
 - `secrecy.test.js`: Active case sanitization, solution masking, clue description concealment.
 - `persistenceFailure.test.js`: Asserts `DURABLE_PERSISTENCE_FAILED` when durable stores are unavailable.
+- `durableMongoPersistence.test.js`: Verifies writes persist on disk in MongoDB and survive complete in-memory cache purges.
 - `casesApi.test.js`: Full integration suite testing all endpoints, CORS allow/reject, concurrency locks, and error codes.
 
 ### Running Frontend Tests (4 Passing Tests)

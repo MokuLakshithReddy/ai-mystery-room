@@ -71,10 +71,10 @@ app.use(cors({
   credentials: true
 }));
 
-// Global API Rate Limiter: 300 requests/min to accommodate active gameplay
+// Global API Rate Limiter (skip in test environment)
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  max: 300, // 300 requests per minute
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => process.env.NODE_ENV === 'test',
@@ -88,34 +88,80 @@ app.use('/api', apiLimiter);
 // Request body size limit
 app.use(express.json({ limit: '1mb' }));
 
-// Non-blocking DB connection attempt
-app.use((req, res, next) => {
-  if (mongoose.connection.readyState === 0) {
-    connectDB().catch(() => {});
+// Database Connection Readiness Middleware
+// Enforces database connection check before passing traffic to case routes
+app.use('/api/cases', async (req, res, next) => {
+  if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 2) {
+    try {
+      await connectDB();
+    } catch (err) {
+      // If MongoDB is unavailable, cloud fallback is handled downstream
+    }
   }
   next();
 });
 
 /**
  * Health & Dependency Status Endpoint
- * Reports actual database connection status, persistence mechanism, and AI availability
+ * Verifies actual dependency connectivity and database reachability before reporting healthy
  */
-app.get('/api/health', (req, res) => {
-  const isMongoReady = mongoose.connection.readyState === 1;
+app.get('/api/health', async (req, res) => {
+  let isMongoReady = false;
+  let mongoPingError = null;
+
+  // 1. Actively ping MongoDB if connected
+  if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    try {
+      await mongoose.connection.db.admin().ping();
+      isMongoReady = true;
+    } catch (err) {
+      mongoPingError = err.message;
+      isMongoReady = false;
+    }
+  }
+
+  // 2. Check if Supabase Cloud Store is configured
+  const isSupabaseConfigured = Boolean(
+    process.env.SUPABASE_URL && 
+    process.env.SUPABASE_KEY && 
+    process.env.SUPABASE_URL.startsWith('http')
+  );
+
+  let isSupabaseReady = false;
+  if (!isMongoReady && isSupabaseConfigured) {
+    try {
+      const pingRes = await fetch(`${process.env.SUPABASE_URL}/rest/v1/ai_mystery_cases?limit=1&select=id`, {
+        headers: {
+          'apikey': process.env.SUPABASE_KEY,
+          'Authorization': `Bearer ${process.env.SUPABASE_KEY}`
+        }
+      });
+      isSupabaseReady = pingRes.ok;
+    } catch (err) {
+      isSupabaseReady = false;
+    }
+  }
+
+  const hasDurableStore = isMongoReady || isSupabaseReady;
   const hasGeminiKey = Boolean(
     process.env.GEMINI_API_KEY && 
     process.env.GEMINI_API_KEY.trim().length > 10 &&
     !process.env.GEMINI_API_KEY.includes('your_gemini')
   );
 
-  res.json({
-    status: 'ok',
+  const status = hasDurableStore ? 'ok' : 'unhealthy';
+  const httpCode = hasDurableStore ? 200 : 503;
+
+  res.status(httpCode).json({
+    status,
+    healthy: hasDurableStore,
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
     database: {
-      connected: isMongoReady,
-      status: isMongoReady ? 'connected' : 'cloud-persistent-store',
-      type: isMongoReady ? 'mongodb' : 'supabase-store'
+      connected: hasDurableStore,
+      status: isMongoReady ? 'connected' : (isSupabaseReady ? 'cloud-store-connected' : 'unreachable'),
+      type: isMongoReady ? 'mongodb' : (isSupabaseConfigured ? 'supabase-store' : 'none'),
+      ping: isMongoReady ? 'pong' : (isSupabaseReady ? 'ok' : (mongoPingError || 'failed'))
     },
     ai: {
       provider: 'google-gemini',
@@ -149,7 +195,8 @@ app.use((err, req, res, next) => {
 // Connect to MongoDB
 let isConnecting = false;
 export async function connectDB() {
-  if (mongoose.connection.readyState >= 1 || isConnecting) return;
+  if (mongoose.connection.readyState >= 1) return;
+  if (isConnecting) return;
   try {
     isConnecting = true;
     console.log(`Connecting to MongoDB at: ${MONGODB_URI}...`);

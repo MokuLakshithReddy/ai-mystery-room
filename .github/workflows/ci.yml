@@ -38,7 +38,6 @@ jobs:
         env:
           NODE_ENV: test
           MONGODB_URI: mongodb://127.0.0.1:27017/ai_mystery_room_ci
-          ALLOW_IN_MEMORY_FOR_TESTS: 'true'
 
   frontend-checks:
     name: Frontend Tests & Production Build

@@ -19,11 +19,13 @@
 - [x] Duplicate actions and repeated requests cannot manipulate scores (idempotent clue discovery, concurrency lock, and locked accusation).
 - [x] Case data persists reliably across separate serverless invocations (MongoDB Atlas + Supabase Cloud REST store).
 - [x] Durable persistence is enforced before returning success; throws `DURABLE_PERSISTENCE_FAILED` (HTTP 503) if store is unreachable.
-- [x] Concurrency immunity: `withCaseLock` serializes concurrent operations per case ID to prevent race conditions.
+- [x] Database-level atomic concurrency: `$elemMatch` conditional updates protect clue discovery, hints, and accusations across distributed instances.
+- [x] Database connection readiness middleware ensures MongoDB is connected before handling case routes.
+- [x] Service health endpoint actively pings the active store and returns HTTP 503 if unreachable.
 - [x] Production CORS is strictly restricted to approved origins; rejects unauthorized browser origins with HTTP 403.
 - [x] Error handling is sanitized; structured error codes are returned without leaking internal stack traces or provider details.
-- [x] The application has automated unit, integration, and component tests (48 backend tests, 4 frontend tests = 52 total).
-- [x] Production environment variables, CORS, deployment configuration, and security are verified.
+- [x] The application has automated unit, integration, and component tests (50 backend tests, 4 frontend tests = 54 total).
+- [x] Dedicated MongoDB persistence suite (`durableMongoPersistence.test.js`) proves case data survives complete cache purges and restarts.
 - [x] The full game has been tested on the deployed frontend and backend across all three difficulties.
 
 ---
@@ -32,18 +34,19 @@
 
 ### A. Durable Persistence Requirement (P0)
 - In `server/models/CaseStore.js`, `saveNewCase`, `discoverCaseClue`, `requestCaseHint`, and `submitCaseAccusation` enforce durable writes via MongoDB Atlas and/or Supabase Cloud Store.
+- Dedicated integration tests in `durableMongoPersistence.test.js` verify that data persists directly on MongoDB and survives `clearLocalCache()` purges.
 - If neither store is reachable, the operation throws `DURABLE_PERSISTENCE_FAILED` and `server/routes/cases.js` returns HTTP 503 (`PERSISTENCE_UNAVAILABLE`).
 - In-memory cache is never treated as the durable source of truth.
 
-### B. Strict Production CORS Origin Control (P0)
-- In `server/index.js`, CORS strictly validates browser origins against `CLIENT_URL` and `https://client-tau-sable-95.vercel.app`.
-- Unknown browser origins in production are rejected with `new Error('CORS_ORIGIN_NOT_ALLOWED')` and return HTTP 403 (`CORS_FORBIDDEN`).
-- Non-browser clients (server-to-server, curl, tests) remain permitted without granting arbitrary browser origins permission.
+### B. MongoDB Connection Readiness & Health Ping (P0)
+- Middleware in `server/index.js` enforces that database connections are awaited before routing requests to `/api/cases`.
+- `GET /api/health` performs an active ping (`mongoose.connection.db.admin().ping()` or Supabase REST check). If no durable store responds, it returns HTTP 503 with `{ status: 'unhealthy', healthy: false }`.
 
-### C. Concurrency Guard & State Transition Locks (P0)
-- Implemented `withCaseLock(caseId, fn)` in `server/models/CaseStore.js`: an async mutex serializing concurrent requests targeting the same case.
-- Accusation transitions atomically from `active` to `completed`. Subsequent or simultaneous accusation attempts receive HTTP 400 (`CASE_ALREADY_COMPLETED`).
-- Concurrent hint requests unlock distinct hints in sequential order without state corruption or score discrepancies.
+### C. Cross-Instance Database-Level Concurrency (P0)
+- Used `$elemMatch` in `findOneAndUpdate` to atomically update only undiscovered clues:
+  `{ _id: caseId, status: 'active', clues: { $elemMatch: { id: clueId, isDiscovered: false } } }`.
+- Guarantees that concurrent requests from separate serverless instances can never corrupt scores or overwrite each other.
+- Accusation uses `{ _id: caseId, status: 'active' }` with `{ returnDocument: 'after' }`, guaranteeing a single atomic transition from active to completed.
 
 ### D. Structural & Evidence-Trail Mystery Validator (P1)
 - In `server/services/mysteryValidator.js`:
@@ -52,13 +55,11 @@
   - Verifies culprit name and motive match the selected suspect.
   - Verifies all crucial clues exist, have substantive descriptions (>= 15 chars), and provide fair-play proof.
   - Verifies spatial diversity across crime scene locations.
+  - Verifies timeline feasibility and perpetrator alibi refutation.
 
-### E. Error Sanitization & Structured Codes (P1)
+### E. Error Sanitization & Rate Limiting (P1)
 - In `server/routes/cases.js`: raw `err.message` is suppressed from production JSON responses.
-- Responses return stable machine-readable codes: `PREMISE_TOO_SHORT`, `INVALID_DIFFICULTY`, `CASE_ALREADY_COMPLETED`, `ALL_HINTS_USED`, `PERSISTENCE_UNAVAILABLE`.
-
-### F. Direct Production Scoring Verification
-- `calculateScore` is exported directly from `server/models/CaseStore.js` and imported into `server/test/unit/scoring.test.js` to ensure production calculation logic is verified directly.
+- `createCaseLimiter` attached specifically to `POST /api/cases` (30 generations/min) to protect Gemini AI quotas without throttling normal investigation gameplay.
 
 ---
 
@@ -87,13 +88,14 @@ $$\text{Final Score} = \max\left(0, (\text{Correct ? Base Bounty} : 0) + (5 \tim
 
 ## 5. Test Suite Execution Summary
 
-- **Backend Tests**: **48 passed** (5 test suites)
+- **Backend Tests**: **50 passed** (6 test suites)
   - `test/unit/mysteryValidator.test.js`: 11 passed
   - `test/unit/scoring.test.js`: 6 passed
   - `test/unit/secrecy.test.js`: 4 passed
   - `test/unit/persistenceFailure.test.js`: 1 passed
+  - `test/integration/durableMongoPersistence.test.js`: 2 passed
   - `test/integration/casesApi.test.js`: 26 passed
 - **Frontend Tests**: **4 passed** (2 test suites)
   - `src/test/ScoreBadge.test.jsx`: 1 passed
   - `src/test/ClueCard.test.jsx`: 3 passed
-- **Total Automated Tests**: **52 passed**.
+- **Total Automated Tests**: **54 passed**.

@@ -91,13 +91,25 @@ app.use(express.json({ limit: '1mb' }));
 // Database Connection Readiness Middleware
 // Enforces database connection check before passing traffic to case routes
 app.use('/api/cases', async (req, res, next) => {
-  if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 2) {
-    try {
-      await connectDB();
-    } catch (err) {
-      // If MongoDB is unavailable, cloud fallback is handled downstream
-    }
+  if (mongoose.connection.readyState !== 1) {
+    await connectDB();
   }
+
+  const isMongoReady = mongoose.connection.readyState === 1;
+  const isSupabaseConfigured = Boolean(
+    process.env.SUPABASE_URL && 
+    process.env.SUPABASE_KEY && 
+    process.env.SUPABASE_URL.startsWith('http')
+  );
+  const allowInMemory = process.env.ALLOW_IN_MEMORY_FOR_TESTS === 'true' || process.env.NODE_ENV === 'test';
+
+  if (!isMongoReady && !isSupabaseConfigured && !allowInMemory) {
+    return res.status(503).json({
+      error: 'Service Unavailable: No durable persistence store is connected or configured.',
+      code: 'DURABLE_STORE_UNAVAILABLE'
+    });
+  }
+
   next();
 });
 
@@ -192,23 +204,35 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Connect to MongoDB
-let isConnecting = false;
+// Connect to MongoDB with shared connection promise
+let dbConnectionPromise = null;
+
 export async function connectDB() {
-  if (mongoose.connection.readyState >= 1) return;
-  if (isConnecting) return;
-  try {
-    isConnecting = true;
-    console.log(`Connecting to MongoDB at: ${MONGODB_URI}...`);
-    await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 2000
-    });
-    console.log('MongoDB connected successfully');
-  } catch (err) {
-    console.warn('MongoDB connection unavailable, using cloud persistent store:', err.message);
-  } finally {
-    isConnecting = false;
+  if (mongoose.connection.readyState === 1) {
+    return true;
   }
+
+  if (dbConnectionPromise) {
+    return await dbConnectionPromise;
+  }
+
+  dbConnectionPromise = (async () => {
+    try {
+      console.log(`Connecting to MongoDB at: ${MONGODB_URI}...`);
+      await mongoose.connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 3000
+      });
+      console.log('MongoDB connected successfully');
+      return true;
+    } catch (err) {
+      console.warn('MongoDB connection unavailable, using fallback store:', err.message);
+      return false;
+    } finally {
+      dbConnectionPromise = null;
+    }
+  })();
+
+  return await dbConnectionPromise;
 }
 
 connectDB().catch(() => {});

@@ -92,6 +92,28 @@ async function cloudUpsertCase(id, caseData) {
   }
 }
 
+async function cloudConditionalPatchCase(id, caseData, expectedStatus) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return false;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/ai_mystery_cases?id=eq.${id}&data->>status=eq.${expectedStatus}`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify({ data: caseData, updated_at: new Date().toISOString() })
+    });
+    if (!res.ok) return false;
+    const records = await res.json();
+    return Array.isArray(records) && records.length > 0;
+  } catch (err) {
+    console.warn('Cloud conditional patch failed:', err.message);
+    return false;
+  }
+}
+
 async function cloudGetCase(id) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return null;
   try {
@@ -357,24 +379,51 @@ export async function discoverCaseClue(caseId, clueId) {
           };
         }
 
-        // Atomically update ONLY if not yet discovered
+        // Atomically update ONLY if not yet discovered and recompute total score in a single atomic pipeline update
+        const now = new Date();
         const updatedDoc = await Case.findOneAndUpdate(
           {
             _id: caseId,
             status: 'active',
             clues: { $elemMatch: { id: clueId, isDiscovered: false } }
           },
-          {
-            $set: {
-              'clues.$.isDiscovered': true,
-              'clues.$.discoveredAt': new Date()
-            },
-            $inc: {
-              'score.clueBonus': 5,
-              'score.totalScore': 5
+          [
+            {
+              $set: {
+                clues: {
+                  $map: {
+                    input: '$clues',
+                    as: 'c',
+                    in: {
+                      $cond: [
+                        { $eq: ['$$c.id', clueId] },
+                        {
+                          $mergeObjects: [
+                            '$$c',
+                            { isDiscovered: true, discoveredAt: now }
+                          ]
+                        },
+                        '$$c'
+                      ]
+                    }
+                  }
+                },
+                'score.clueBonus': { $add: ['$score.clueBonus', 5] },
+                'score.totalScore': {
+                  $max: [
+                    0,
+                    {
+                      $subtract: [
+                        { $add: ['$score.basePoints', { $add: ['$score.clueBonus', 5] }] },
+                        '$score.hintPenalty'
+                      ]
+                    }
+                  ]
+                }
+              }
             }
-          },
-          { returnDocument: 'after' }
+          ],
+          { returnDocument: 'after', updatePipeline: true }
         ).select('+solution');
 
         const finalDoc = updatedDoc || (await Case.findById(caseId).select('+solution'));
@@ -443,66 +492,93 @@ export async function discoverCaseClue(caseId, clueId) {
 }
 
 /**
- * Request a hint - database-level atomic conditional progression
+ * Request a hint - database-level atomic conditional progression with bounded retry
+ * Avoids recursive lock reacquisition to prevent deadlocks under cross-instance concurrency.
  */
 export async function requestCaseHint(caseId) {
   return withCaseLock(caseId, async () => {
-    // 1. MongoDB atomic conditional update
+    // 1. MongoDB atomic conditional update with bounded in-lock retry
     if (isMongoConnected()) {
       try {
-        const currentDoc = await Case.findById(caseId);
-        if (!currentDoc) return null;
-        if (currentDoc.status === 'completed') return { error: 'Case already completed' };
+        const MAX_RETRIES = 5;
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+          const currentDoc = await Case.findById(caseId);
+          if (!currentDoc) return null;
+          if (currentDoc.status === 'completed') return { error: 'Case already completed' };
 
-        const nextHint = currentDoc.hints.find(h => !h.isUnlocked);
-        if (!nextHint) return { error: 'All hints declassified' };
+          const nextHint = currentDoc.hints.find(h => !h.isUnlocked);
+          if (!nextHint) return { error: 'All hints declassified' };
 
-        // Atomically claim the specific locked hint
-        const updatedDoc = await Case.findOneAndUpdate(
-          {
-            _id: caseId,
-            status: 'active',
-            hints: { $elemMatch: { id: nextHint.id, isUnlocked: false } }
-          },
-          {
-            $set: {
-              'hints.$.isUnlocked': true,
-              'hints.$.unlockedAt': new Date()
+          // Atomically claim the specific locked hint and recalculate floored totalScore in one single atomic operation
+          const now = new Date();
+          const updatedDoc = await Case.findOneAndUpdate(
+            {
+              _id: caseId,
+              status: 'active',
+              hints: { $elemMatch: { id: nextHint.id, isUnlocked: false } }
             },
-            $inc: {
-              'score.hintPenalty': 10
-            }
-          },
-          { returnDocument: 'after' }
-        ).select('+solution');
+            [
+              {
+                $set: {
+                  hints: {
+                    $map: {
+                      input: '$hints',
+                      as: 'h',
+                      in: {
+                        $cond: [
+                          { $eq: ['$$h.id', nextHint.id] },
+                          {
+                            $mergeObjects: [
+                              '$$h',
+                              { isUnlocked: true, unlockedAt: now }
+                            ]
+                          },
+                          '$$h'
+                        ]
+                      }
+                    }
+                  },
+                  'score.hintPenalty': { $add: ['$score.hintPenalty', 10] },
+                  'score.totalScore': {
+                    $max: [
+                      0,
+                      {
+                        $subtract: [
+                          { $add: ['$score.basePoints', '$score.clueBonus'] },
+                          { $add: ['$score.hintPenalty', 10] }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            { returnDocument: 'after', updatePipeline: true }
+          ).select('+solution');
 
-        if (!updatedDoc) {
-          // Another instance claimed this hint simultaneously; retry to claim the next one
-          return requestCaseHint(caseId);
+          if (!updatedDoc) {
+            // Another instance claimed this hint simultaneously; retry loop to claim next available hint
+            continue;
+          }
+
+          const rawObj = updatedDoc.toObject();
+          inMemoryCases.set(caseId, rawObj);
+          await cloudUpsertCase(caseId, rawObj);
+
+          const unlocked = rawObj.hints.find(h => h.id === nextHint.id);
+          return {
+            hint: {
+              id: unlocked.id,
+              text: unlocked.text,
+              isUnlocked: true,
+              unlockedAt: unlocked.unlockedAt
+            },
+            hintsRemaining: rawObj.hints.filter(h => !h.isUnlocked).length,
+            currentScore: rawObj.score.totalScore
+          };
         }
 
-        // Recompute floored total score
-        const newTotal = Math.max(0, updatedDoc.score.basePoints + updatedDoc.score.clueBonus - updatedDoc.score.hintPenalty);
-        if (updatedDoc.score.totalScore !== newTotal) {
-          await Case.updateOne({ _id: caseId }, { $set: { 'score.totalScore': newTotal } });
-          updatedDoc.score.totalScore = newTotal;
-        }
-
-        const rawObj = updatedDoc.toObject();
-        inMemoryCases.set(caseId, rawObj);
-        await cloudUpsertCase(caseId, rawObj);
-
-        const unlocked = rawObj.hints.find(h => h.id === nextHint.id);
-        return {
-          hint: {
-            id: unlocked.id,
-            text: unlocked.text,
-            isUnlocked: true,
-            unlockedAt: unlocked.unlockedAt
-          },
-          hintsRemaining: rawObj.hints.filter(h => !h.isUnlocked).length,
-          currentScore: rawObj.score.totalScore
-        };
+        return { error: 'All hints declassified or claimed' };
       } catch (err) {
         console.warn('MongoDB atomic hint request error:', err.message);
       }
@@ -651,7 +727,15 @@ export async function submitCaseAccusation(caseId, suspectId, rationale) {
     };
     caseData.score = finalScoreObj;
 
-    await persistDurable(caseId, caseData, false);
+    if (SUPABASE_URL && SUPABASE_KEY) {
+      const patched = await cloudConditionalPatchCase(caseId, caseData, 'active');
+      if (!patched) {
+        return { error: 'Case already completed' };
+      }
+      inMemoryCases.set(caseId, caseData);
+    } else {
+      await persistDurable(caseId, caseData, false);
+    }
 
     return {
       isCorrect,

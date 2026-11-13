@@ -2,6 +2,11 @@
 
 > An interactive, AI-driven detective investigation web application where users create, investigate, and solve murder mysteries dynamically synthesized with Gemini.
 
+
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/stargazers)
+[![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/network/members)
+[![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/commits/main)
+
 ---
 
 ## 🌐 Live Production Deployments
@@ -55,6 +60,27 @@ Unlike static murder-mystery games, every case is generated dynamically with str
 - **Durable Persistence & Concurrency Locks**: Enforces durable persistence before returning success; uses `withCaseLock` mutex to prevent race conditions.
 
 ---
+
+## Case lifecycle and trust boundary
+
+```mermaid
+flowchart TD
+    U["Player requests a case and difficulty"] --> API["Express API"]
+    API --> AI["Gemini structured mystery generation"]
+    AI --> V["Zod and mystery validation"]
+    V --> DB["MongoDB persistence"]
+    DB --> C["Return sanitised active case"]
+    C --> UI["Investigation UI"]
+    UI --> CL["Inspect clues and request hints"]
+    CL --> API
+    API --> DB
+    UI --> ACC["Submit final accusation"]
+    ACC --> API
+    API --> SOL["Reveal solution and score after accusation"]
+    SOL --> UI
+```
+
+**The security boundary matters:** the client receives only the active case projection. The hidden solution and culprit remain server-side until the accusation flow explicitly releases the verdict. The zero-spoiler rules and test suites below document this boundary.
 
 ## 🔒 Zero-Spoiler Security Model
 1. **Model Projection Masking**: The `solution` schema field in Mongoose has `{ select: false }`. It is never loaded by default queries.

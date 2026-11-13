@@ -1,5 +1,8 @@
 # 🔍 AI Mystery Room
 
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/stargazers) [![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/forks) [![Open Issues](https://img.shields.io/github/issues/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/issues) [![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/ai-mystery-room?style=flat-square)](https://github.com/MokuLakshithReddy/ai-mystery-room/commits/main)
+
+
 > An interactive, AI-driven detective investigation web application where users create, investigate, and solve murder mysteries dynamically synthesized with Gemini.
 
 ---

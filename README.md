@@ -4,6 +4,27 @@
 
 ---
 
+## Investigation lifecycle
+
+~~~mermaid
+flowchart TD
+    A["Create a mystery with Gemini"] --> B["Backend validates case structure"]
+    B --> C["Player opens case and explores suspects"]
+    C --> D["Inspect clues and request optional hints"]
+    D --> E["Build an evidence trail"]
+    E --> F["Submit a formal accusation"]
+    F --> G["Backend reveals verdict and solution breakdown"]
+~~~
+
+### Visual proof and trust boundaries
+
+The key architectural decision is that the client receives only information needed for the current investigation stage. The repository's README documents the solution field as excluded from default MongoDB projections, unexamined clue details as server-side, and hints as masked until a deliberate request. These are application design claims; verify them against the current server implementation and tests before treating them as a security certification.
+
+**Project value:** turns a static riddle into a structured investigation in which players gather evidence and commit to a verdict. The deployed [web app](https://client-tau-sable-95.vercel.app) and [API health endpoint](https://server-beta-blond-45.vercel.app/api/health) are available for a live walkthrough.
+
+See the [server test suite](server) and [API repository code](server/index.js) for implementation details. The README reports 48 server tests; the current GitHub Actions result should be used as the source of truth for the latest pass/fail state.
+
+---
 ## 🌐 Live Production Deployments
 - **Web App (Frontend)**: [https://client-tau-sable-95.vercel.app](https://client-tau-sable-95.vercel.app)
 - **REST API (Backend)**: [https://server-beta-blond-45.vercel.app](https://server-beta-blond-45.vercel.app)

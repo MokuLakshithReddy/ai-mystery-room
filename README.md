@@ -17,6 +17,16 @@
 
 ---
 
+## Visual proof and demo recording
+
+A Playwright workflow captures the currently deployed public UI at the home page and case-creation route, then uploads full-page screenshots, a short navigation recording, and a capture manifest as a GitHub Actions artifact.
+
+[View visual-evidence workflow runs](https://github.com/MokuLakshithReddy/ai-mystery-room/actions/workflows/visual-evidence.yml)
+
+**Capture scope:** this verifies that the public pages rendered and were capturable. It does not claim that a new case was persisted or that all backend operations succeeded. The separate automated backend/frontend test suites remain the evidence for application behavior.
+
+---
+
 ## 📋 Table of Contents
 - [Project Overview](#-project-overview)
 - [Key Features](#-key-features)

@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: visual-evidence-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   capture-public-demo:
     name: Capture production UI screenshots and short recording
@@ -59,7 +63,10 @@ jobs:
             exit 0
           fi
           git commit -m "docs: add captured production screenshots"
-          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+          PR_BRANCH="${{ github.event.pull_request.head.ref }}"
+          git fetch origin "$PR_BRANCH"
+          git rebase "origin/$PR_BRANCH"
+          git push origin "HEAD:$PR_BRANCH"
 
       - name: Upload screenshots and recording
         if: always()

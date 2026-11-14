@@ -79,6 +79,8 @@ try {
   await browser.close();
 }
 
+await fs.rm(videoDir, { recursive: true, force: true });
+
 await fs.writeFile(
   path.join(outputDir, "capture-manifest.json"),
   JSON.stringify({

@@ -1,0 +1,53 @@
+name: Live Demo Visual Evidence
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/visual-evidence.yml"
+      - "client/scripts/capture-public-demo.mjs"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture-public-demo:
+    name: Capture production UI screenshots and short recording
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install client dependencies
+        run: npm ci
+        working-directory: client
+
+      - name: Install Playwright
+        run: npm install --no-save playwright@1.56.1
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      - name: Capture public production routes
+        run: node scripts/capture-public-demo.mjs
+        working-directory: client
+        env:
+          DEMO_URL: https://client-tau-sable-95.vercel.app
+
+      - name: Upload screenshots and recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-mystery-room-visual-evidence
+          path: docs/screenshots/
+          if-no-files-found: warn
+          retention-days: 90

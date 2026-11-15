@@ -1,0 +1,22 @@
+{
+  "capturedAt": "2026-11-14T02:47:56.486Z",
+  "source": "public production deployment",
+  "baseUrl": "https://client-tau-sable-95.vercel.app",
+  "captures": [
+    {
+      "path": "docs/screenshots/home.png",
+      "url": "https://client-tau-sable-95.vercel.app/",
+      "status": 200,
+      "title": "client",
+      "visibleTextLength": 5615
+    },
+    {
+      "path": "docs/screenshots/create-case.png",
+      "url": "https://client-tau-sable-95.vercel.app/create",
+      "status": 200,
+      "title": "client",
+      "visibleTextLength": 1655
+    }
+  ],
+  "note": "Screenshots verify that the public routes rendered; they do not prove case creation, persistence, or backend API correctness."
+}
